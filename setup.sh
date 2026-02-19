@@ -117,23 +117,49 @@ chown -R $USERNAME:$USERNAME "$HOME_DIR/.config/autostart"
 echo ""
 echo "[5/6] Disabling lock screen, screensaver, and power management..."
 
-su - $USERNAME -c '
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -s 0 2>/dev/null || true
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-battery -s 0 2>/dev/null || true
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-enabled -s false 2>/dev/null || true
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-sleep -s 0 2>/dev/null || true
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-off -s 0 2>/dev/null || true
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-battery-sleep -s 0 2>/dev/null || true
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-battery-off -s 0 2>/dev/null || true
-  xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/lock-screen-suspend-hibernate -n -t bool -s false 2>/dev/null || true
-  xfconf-query -c xfce4-screensaver -p /saver/enabled -s false 2>/dev/null || true
-  xfconf-query -c xfce4-screensaver -p /lock/enabled -s false 2>/dev/null || true
-  xfconf-query -c xfce4-screensaver -p /lock/saver-activation -n -t bool -s false 2>/dev/null || true
-  xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/<Super>l" -r 2>/dev/null || true
-'
+XFCONF_DIR="$HOME_DIR/.config/xfce4/xfconf/xfce-perchannel-xml"
+mkdir -p "$XFCONF_DIR"
 
-# Mask screensaver service
+# Power manager: disable all screen blanking and DPMS
+cat > "$XFCONF_DIR/xfce4-power-manager.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-power-manager" version="1.0">
+  <property name="xfce4-power-manager" type="empty">
+    <property name="dpms-enabled" type="bool" value="false"/>
+    <property name="blank-on-ac" type="int" value="0"/>
+    <property name="blank-on-battery" type="int" value="0"/>
+    <property name="dpms-on-ac-sleep" type="uint" value="0"/>
+    <property name="dpms-on-ac-off" type="uint" value="0"/>
+    <property name="dpms-on-battery-sleep" type="uint" value="0"/>
+    <property name="dpms-on-battery-off" type="uint" value="0"/>
+    <property name="lock-screen-suspend-hibernate" type="bool" value="false"/>
+    <property name="dpms-sleep-mode" type="string" value=""/>
+  </property>
+</channel>
+EOF
+
+# Screensaver: disable completely
+cat > "$XFCONF_DIR/xfce4-screensaver.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-screensaver" version="1.0">
+  <property name="saver" type="empty">
+    <property name="enabled" type="bool" value="false"/>
+    <property name="mode" type="int" value="0"/>
+  </property>
+  <property name="lock" type="empty">
+    <property name="enabled" type="bool" value="false"/>
+    <property name="saver-activation" type="bool" value="false"/>
+  </property>
+</channel>
+EOF
+
+chown -R $USERNAME:$USERNAME "$XFCONF_DIR"
+
+# Mask screensaver service so it cannot start
 systemctl mask xfce4-screensaver.service 2>/dev/null || true
+
+# Also remove xfce4-screensaver package if installed
+apt remove -y xfce4-screensaver 2>/dev/null || true
 
 # ─────────────────────────────────────────────
 # 6. USB-TTL SERIAL PORT (Arduino / CH340)
