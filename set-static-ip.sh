@@ -27,5 +27,5 @@ sudo sed -i "s|addresses:\s*-\s*192\.168\.1\.[0-9]*/24|addresses:\n        - $NE
 # Apply
 sudo netplan apply
 
-echo "✅ Done! enp6s0 is now $NEW_IP"
-ip addr show enp6s0 | grep "inet "
+echo "✅ Done! enp1s0 is now $NEW_IP"
+ip addr show enp1s0 | grep "inet "
