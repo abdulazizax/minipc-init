@@ -1,31 +1,27 @@
 #!/bin/bash
 
-# Usage: ./set-static-ip.sh 192.168.1.50
+# Usage: sudo ./set-static-ip.sh 192.168.1.50
 
-if [ -z "$1" ]; then
-  echo "❌ Usage: $0 <IP_ADDRESS>"
-  echo "Example: $0 192.168.1.50"
-  exit 1
-fi
+NEW_IP="${1:-192.168.1.50}"
 
-NEW_IP="$1"
+echo "🔧 Setting IP: $NEW_IP"
 
-echo "🔧 Setting static IP: $NEW_IP"
+sudo tee /etc/netplan/01-static-ip.yaml > /dev/null <<EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp1s0:
+      dhcp4: no
+      addresses:
+        - $NEW_IP/24
+      nameservers:
+        addresses:
+          - 8.8.8.8
+EOF
 
-# Validate IP format
-if ! [[ $NEW_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "❌ Invalid IP address format"
-  exit 1
-fi
-
-# Backup
-sudo cp /etc/netplan/03-final-config.yaml /etc/netplan/03-final-config.yaml.backup-$(date +%Y%m%d-%H%M%S)
-
-# Update config
-sudo sed -i "s|addresses:\s*-\s*192\.168\.1\.[0-9]*/24|addresses:\n        - $NEW_IP/24|g" /etc/netplan/03-final-config.yaml
-
-# Apply
+sudo chmod 600 /etc/netplan/01-static-ip.yaml
 sudo netplan apply
 
-echo "✅ Done! enp1s0 is now $NEW_IP"
+echo "✅ Done! IP: $NEW_IP"
 ip addr show enp1s0 | grep "inet "
