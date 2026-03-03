@@ -202,30 +202,24 @@ modprobe ftdi_sio 2>/dev/null || true
 modprobe cp210x 2>/dev/null || true
 modprobe pl2303 2>/dev/null || true
 
-# Udev rules for serial port permissions + disable USB autosuspend per device
+# Udev rules for serial port permissions + persistent symlinks + disable USB autosuspend
 tee /etc/udev/rules.d/50-usb-serial.rules > /dev/null <<'EOF'
 # === DISABLE USB AUTOSUSPEND FOR ALL USB DEVICES ===
 ACTION=="add", SUBSYSTEM=="usb", ATTR{power/control}="on"
 ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend}="-1"
 ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend_delay_ms}="-1"
 
-# CH340/CH341
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE="0666"
-KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE="0666", GROUP="dialout"
-
+# === PERSISTENT SYMLINK: /dev/turniket-gate ===
+# CH340/CH341 (most common USB-TTL for Arduino)
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="turniket-gate", MODE="0666", GROUP="dialout"
 # FTDI
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", MODE="0666"
-KERNEL=="ttyUSB*", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", MODE="0666", GROUP="dialout"
-
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="turniket-gate", MODE="0666", GROUP="dialout"
 # CP210x
-SUBSYSTEM=="usb", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", MODE="0666"
-KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", MODE="0666", GROUP="dialout"
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="turniket-gate", MODE="0666", GROUP="dialout"
+# Arduino ACM (native USB)
+KERNEL=="ttyACM*", ATTRS{idVendor}=="2341", SYMLINK+="turniket-gate", MODE="0666", GROUP="dialout"
 
-# PL2303
-SUBSYSTEM=="usb", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", MODE="0666"
-KERNEL=="ttyUSB*", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", MODE="0666", GROUP="dialout"
-
-# Generic serial ports
+# Generic permissions
 SUBSYSTEM=="tty", GROUP="dialout", MODE="0660"
 KERNEL=="ttyUSB[0-9]*", MODE="0666"
 KERNEL=="ttyACM[0-9]*", MODE="0666"
@@ -291,6 +285,70 @@ if [ -f /etc/tlp.conf ]; then
 fi
 
 # ─────────────────────────────────────────────
+# 8. USB PORT RECOVERY WATCHDOG
+# ─────────────────────────────────────────────
+echo ""
+echo "[8/8] Installing USB port recovery watchdog..."
+
+tee /usr/local/bin/usb-watchdog.sh > /dev/null <<'SCRIPT'
+#!/bin/bash
+# USB Port Watchdog: detects when /dev/turniket-gate disappears and rebinds the xHCI controller.
+# Runs every 30s. Only acts if the device has been missing for 2 consecutive checks.
+
+GATE_DEV="/dev/turniket-gate"
+MISS_COUNT=0
+MAX_MISS=2
+
+while true; do
+  sleep 30
+
+  if [ -e "$GATE_DEV" ]; then
+    MISS_COUNT=0
+    continue
+  fi
+
+  MISS_COUNT=$((MISS_COUNT + 1))
+  logger -t usb-watchdog "Gate device missing ($MISS_COUNT/$MAX_MISS)"
+
+  if [ "$MISS_COUNT" -ge "$MAX_MISS" ]; then
+    logger -t usb-watchdog "Rebinding all xhci_hcd controllers..."
+
+    for hci in /sys/bus/pci/drivers/xhci_hcd/????:??:??.?; do
+      DEV=$(basename "$hci")
+      echo "$DEV" > /sys/bus/pci/drivers/xhci_hcd/unbind 2>/dev/null || true
+      sleep 1
+      echo "$DEV" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null || true
+    done
+
+    sleep 5
+    MISS_COUNT=0
+    logger -t usb-watchdog "xHCI rebind complete"
+  fi
+done
+SCRIPT
+
+chmod +x /usr/local/bin/usb-watchdog.sh
+
+tee /etc/systemd/system/usb-watchdog.service > /dev/null <<'EOF'
+[Unit]
+Description=USB Port Recovery Watchdog
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/usb-watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable usb-watchdog.service
+systemctl start usb-watchdog.service
+
+# ─────────────────────────────────────────────
 # DONE
 # ─────────────────────────────────────────────
 echo ""
@@ -306,6 +364,7 @@ echo "  [x] Lock screen disabled"
 echo "  [x] USB-TTL serial port configured"
 echo "  [x] ModemManager removed"
 echo "  [x] USB autosuspend disabled (GRUB + systemd + udev)"
+echo "  [x] USB port recovery watchdog installed"
 echo ""
 echo "  REBOOT REQUIRED: sudo reboot"
 echo ""
