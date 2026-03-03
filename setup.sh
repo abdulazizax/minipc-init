@@ -165,7 +165,7 @@ apt remove -y xfce4-screensaver 2>/dev/null || true
 # 6. USB-TTL SERIAL PORT (Arduino / CH340)
 # ─────────────────────────────────────────────
 echo ""
-echo "[6/6] Configuring USB-TTL serial port for Arduino..."
+echo "[6/7] Configuring USB-TTL serial port for Arduino..."
 
 # Remove brltty (it grabs the serial port)
 systemctl stop brltty-udev.service 2>/dev/null || true
@@ -173,6 +173,13 @@ systemctl mask brltty-udev.service 2>/dev/null || true
 systemctl stop brltty.service 2>/dev/null || true
 systemctl disable brltty.service 2>/dev/null || true
 apt remove -y brltty 2>/dev/null || true
+
+# Remove ModemManager (it grabs serial ports for ~30s on plug)
+systemctl stop ModemManager.service 2>/dev/null || true
+systemctl disable ModemManager.service 2>/dev/null || true
+systemctl mask ModemManager.service 2>/dev/null || true
+apt remove -y modemmanager 2>/dev/null || true
+
 apt autoremove -y
 
 # Add user to serial groups
@@ -195,8 +202,13 @@ modprobe ftdi_sio 2>/dev/null || true
 modprobe cp210x 2>/dev/null || true
 modprobe pl2303 2>/dev/null || true
 
-# Udev rules for serial port permissions
+# Udev rules for serial port permissions + disable USB autosuspend per device
 tee /etc/udev/rules.d/50-usb-serial.rules > /dev/null <<'EOF'
+# === DISABLE USB AUTOSUSPEND FOR ALL USB DEVICES ===
+ACTION=="add", SUBSYSTEM=="usb", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend_delay_ms}="-1"
+
 # CH340/CH341
 SUBSYSTEM=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE="0666"
 KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE="0666", GROUP="dialout"
@@ -223,6 +235,62 @@ udevadm control --reload-rules
 udevadm trigger
 
 # ─────────────────────────────────────────────
+# 7. DISABLE USB AUTOSUSPEND (GLOBAL)
+# ─────────────────────────────────────────────
+echo ""
+echo "[7/7] Disabling USB autosuspend globally..."
+
+# Disable USB autosuspend immediately
+echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null || true
+
+# Disable for all currently connected USB devices
+for dev in /sys/bus/usb/devices/*/power/control; do
+  echo "on" > "$dev" 2>/dev/null || true
+done
+for dev in /sys/bus/usb/devices/*/power/autosuspend; do
+  echo -1 > "$dev" 2>/dev/null || true
+done
+
+# Add kernel boot parameter to permanently disable USB autosuspend
+GRUB_FILE="/etc/default/grub"
+if [ -f "$GRUB_FILE" ]; then
+  if ! grep -q "usbcore.autosuspend=-1" "$GRUB_FILE"; then
+    sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 usbcore.autosuspend=-1"/' "$GRUB_FILE"
+    update-grub
+    echo "  GRUB updated with usbcore.autosuspend=-1"
+  else
+    echo "  GRUB already has usbcore.autosuspend=-1"
+  fi
+fi
+
+# Systemd service: ensure USB power stays on after every boot
+tee /etc/systemd/system/usb-power-on.service > /dev/null <<'EOF'
+[Unit]
+Description=Disable USB autosuspend for all devices
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'echo -1 > /sys/module/usbcore/parameters/autosuspend; for d in /sys/bus/usb/devices/*/power/control; do echo on > "$d" 2>/dev/null; done; for d in /sys/bus/usb/devices/*/power/autosuspend; do echo -1 > "$d" 2>/dev/null; done'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable usb-power-on.service
+systemctl start usb-power-on.service
+
+# Disable TLP USB autosuspend if TLP is installed
+if [ -f /etc/tlp.conf ]; then
+  if ! grep -q "USB_AUTOSUSPEND=0" /etc/tlp.conf; then
+    echo "USB_AUTOSUSPEND=0" >> /etc/tlp.conf
+    echo "  TLP USB autosuspend disabled"
+  fi
+fi
+
+# ─────────────────────────────────────────────
 # DONE
 # ─────────────────────────────────────────────
 echo ""
@@ -236,6 +304,8 @@ echo "  [x] Cursor auto-hide enabled"
 echo "  [x] Screen will never turn off"
 echo "  [x] Lock screen disabled"
 echo "  [x] USB-TTL serial port configured"
+echo "  [x] ModemManager removed"
+echo "  [x] USB autosuspend disabled (GRUB + systemd + udev)"
 echo ""
 echo "  REBOOT REQUIRED: sudo reboot"
 echo ""
