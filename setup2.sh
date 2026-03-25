@@ -1,14 +1,21 @@
 #!/bin/bash
 #
 # Xubuntu MiniPC kiosk: USB/xHCI "uxlash" va tizim uyqusini minimallashtirish.
-# Ishlatish: sudo bash scripts/xubuntu-minipc-kiosk-usb-hardening.sh
+#
+# Ishlatish (minipc-init repoda, pull qilgach):
+#   cd /path/to/minipc-init
+#   chmod +x setup2.sh
+#   sudo ./setup2.sh
+#
+# Yoki:
+#   sudo bash setup2.sh
 #
 # Nima qiladi:
-#   - systemd-logind: idle/suspend tugmalari va qopqoq hodisalarini e'tiborsiz qoldirish (kiosk)
+#   - systemd-logind: idle/suspend tugmalari va qopqoq hodisalarini e'tiborsiz qoldirish
 #   - GRUB: usbcore.autosuspend, usbhid.autosuspend, pcie_aspm=off (dublikat qo'shilmaydi)
 #   - modprobe: usbcore autosuspend=-1
-#   - minipc-usb-pci-power-on.sh + systemd service + timer (5 daqiqada qayta)
-#   - sleep.target va suspend targetlarni mask (faqat kiosk; server emas)
+#   - /usr/local/bin/minipc-usb-pci-power-on.sh + systemd service + timer (5 daqiqada qayta)
+#   - sleep.target va suspend targetlarni mask (faqat kiosk)
 #
 set -euo pipefail
 
@@ -19,10 +26,13 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRUB_FILE="/etc/default/grub"
+USB_PCI_SCRIPT="/usr/local/bin/minipc-usb-pci-power-on.sh"
 
-echo "=== Xubuntu MiniPC kiosk USB / power hardening ==="
+echo "=== Xubuntu MiniPC kiosk USB / power hardening (setup2.sh) ==="
+echo "  Repo dir: $SCRIPT_DIR"
+echo ""
 
-# ── 1) logind: hech qachon idle suspend qilmasin (XFCE bilan birga) ─────────
+# ── 1) logind ───────────────────────────────────────────────────────────────
 mkdir -p /etc/systemd/logind.conf.d
 tee /etc/systemd/logind.conf.d/80-kiosk-no-suspend.conf >/dev/null <<'EOF'
 [Login]
@@ -37,7 +47,7 @@ EOF
 
 systemctl restart systemd-logind.service || true
 
-# ── 2) GRUB: kernel parametrlar (bir marta, dublikatsiyasiz) ─────────────────
+# ── 2) GRUB ─────────────────────────────────────────────────────────────────
 append_grub_default_if_missing() {
   local param="$1"
   if [ ! -f "$GRUB_FILE" ]; then
@@ -51,7 +61,6 @@ append_grub_default_if_missing() {
   if echo "$line" | grep -qF -- "$param"; then
     return 0
   fi
-  # Qo'shtirnoq ichidagi oxirgi " oldidan param qo'shamiz
   sed -i 's|^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"|\1 '"$param"'"|' "$GRUB_FILE"
   echo "  GRUB: qo'shildi: $param"
 }
@@ -65,24 +74,45 @@ if [ -f "$GRUB_FILE" ]; then
   fi
 fi
 
-# ── 3) modprobe: modul yuklanganda ham autosuspend o'chiq bo'lsin ────────────
+# ── 3) modprobe ─────────────────────────────────────────────────────────────
 tee /etc/modprobe.d/zz-kiosk-usbcore.conf >/dev/null <<'EOF'
 # Kiosk: USB core autosuspend o'chiq (GRUB bilan bir xil maqsad)
 options usbcore autosuspend=-1
 EOF
 
-# ── 4) USB + PCI power on skripti va systemd ─────────────────────────────────
-install -m 0755 "$SCRIPT_DIR/minipc-usb-pci-power-on.sh" /usr/local/bin/minipc-usb-pci-power-on.sh
+# ── 4) USB + PCI skripti (mustaqil — alohida fayl talab qilmaydi) ───────────
+cat > "$USB_PCI_SCRIPT" <<'USBPCI'
+#!/bin/bash
+# USB + PCI runtime PM off (minipc-init setup2.sh tomonidan o'rnatilgan)
+set +e
+if [ -w /sys/module/usbcore/parameters/autosuspend ]; then
+  echo -1 > /sys/module/usbcore/parameters/autosuspend
+fi
+for d in /sys/bus/usb/devices/*/power/control; do
+  [ -w "$d" ] && echo on > "$d"
+done
+for d in /sys/bus/usb/devices/*/power/autosuspend; do
+  [ -w "$d" ] && echo -1 > "$d"
+done
+for d in /sys/bus/usb/devices/*/power/autosuspend_delay_ms; do
+  [ -w "$d" ] && echo -1 > "$d"
+done
+for d in /sys/bus/pci/devices/*/power/control; do
+  [ -w "$d" ] && echo on > "$d"
+done
+exit 0
+USBPCI
+chmod 0755 "$USB_PCI_SCRIPT"
 
-tee /etc/systemd/system/minipc-usb-pci-power-on.service >/dev/null <<'EOF'
+tee /etc/systemd/system/minipc-usb-pci-power-on.service >/dev/null <<EOF
 [Unit]
-Description=USB + PCI runtime PM off (Xubuntu kiosk)
+Description=USB + PCI runtime PM off (Xubuntu kiosk, minipc-init)
 After=multi-user.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/bin/minipc-usb-pci-power-on.sh
+ExecStart=$USB_PCI_SCRIPT
 
 [Install]
 WantedBy=multi-user.target
@@ -106,25 +136,24 @@ systemctl daemon-reload
 systemctl enable --now minipc-usb-pci-power-on.service
 systemctl enable --now minipc-usb-pci-power-on.timer
 
-# Eski setup.sh dagi oddiy usb-power-on.service bilan ikki marta bir xil ish bajarilmasin
+# Eski setup.sh dagi usb-power-on.service bilan dublikat bo'lmasin
 if systemctl is-enabled usb-power-on.service &>/dev/null; then
   systemctl disable --now usb-power-on.service 2>/dev/null || true
   echo "  Eski usb-power-on.service o'chirildi (minipc-usb-pci-power-on bilan almashtirildi)"
 fi
 
-# ── 5) Tizim uyqusini bloklash (kiosk; masofadan boshqarilmaydigan stend) ─────
-# Agar masofadan suspend kerak bo'lsa, bu qatorlarni o'chirib qo'ying.
+# ── 5) Sleep / suspend mask (kiosk) ─────────────────────────────────────────
 for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do
   if systemctl list-unit-files "$t" &>/dev/null; then
     systemctl mask --now "$t" 2>/dev/null || true
   fi
 done
 
-# ── 6) TLP o'rnatilgan bo'lsa, USB autosuspend o'chiq bo'lsin ─────────────────
+# ── 6) TLP ──────────────────────────────────────────────────────────────────
 if [ -f /etc/tlp.conf ]; then
   if ! grep -q '^USB_AUTOSUSPEND=0' /etc/tlp.conf; then
     echo "" >> /etc/tlp.conf
-    echo "# kiosk: added by xubuntu-minipc-kiosk-usb-hardening.sh" >> /etc/tlp.conf
+    echo "# kiosk: added by minipc-init setup2.sh" >> /etc/tlp.conf
     echo "USB_AUTOSUSPEND=0" >> /etc/tlp.conf
     systemctl restart tlp.service 2>/dev/null || true
     echo "  TLP: USB_AUTOSUSPEND=0 qo'shildi"
@@ -134,9 +163,9 @@ fi
 echo ""
 echo "=== Tayyor ==="
 echo "  - logind: /etc/systemd/logind.conf.d/80-kiosk-no-suspend.conf"
-echo "  - GRUB + modprobe: qayta yuklangandan keyin to'liq kuchga kiradi"
-echo "  - minipc-usb-pci-power-on: service + timer faol"
-echo "  - sleep/suspend targetlar mask qilindi (kiosk)"
+echo "  - GRUB + modprobe: rebootdan keyin to'liq kuchga kiradi"
+echo "  - $USB_PCI_SCRIPT + systemd service + timer"
+echo "  - sleep/suspend targetlar mask (kiosk)"
 echo ""
-echo "  REBOOT tavsiya: sudo reboot"
+echo "  Keyingi qadam: sudo reboot"
 echo ""
